@@ -2,13 +2,12 @@ package in.ecommerce.ecommerce.service;
 
 import in.ecommerce.ecommerce.DTO.OrderDto;
 import in.ecommerce.ecommerce.DTO.OrderItemDto;
+import in.ecommerce.ecommerce.Redis.RedisStockService;
 import in.ecommerce.ecommerce.entity.*;
 import in.ecommerce.ecommerce.repo.CartRepo;
 import in.ecommerce.ecommerce.repo.OrderRepo;
 import in.ecommerce.ecommerce.repo.ProductRepo;
 import in.ecommerce.ecommerce.repo.UserRepo;
-import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -21,11 +20,11 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class OrderService {
 
-    private final RedissonClient redissonClient;
     private final OrderRepo orderRepo;
     private final CartRepo cartRepo;
     private final ProductRepo productRepo;
     private final UserRepo userRepo;
+    private final RedisStockService redisStockService;
 
     @Transactional
     public OrderDto createOrder(Long userId) {
@@ -44,46 +43,55 @@ public class OrderService {
                 .build();
 
         List<OrderItem> orderItems = new ArrayList<>();
+        List<CartItem> reservedItems = new ArrayList<>();
         for (CartItem cartItem : cart.getItems()) {
-            String lockKey = "product_lock:" + cartItem.getProduct().getId();
-            RLock lock = redissonClient.getLock(lockKey);
+            // 🔥 Lock and Refresh Product State
 
-            try {
-                // Try to acquire lock for 10 seconds, lease time 10 seconds
-                if (lock.tryLock(10, 10, java.util.concurrent.TimeUnit.SECONDS)) {
-                    try {
-                        Product product = productRepo.findById(cartItem.getProduct().getId())
-                                .orElseThrow(() -> new RuntimeException(
-                                        "Product not found: " + cartItem.getProduct().getName()));
-
-                        if (product.getStock() < cartItem.getQuantity()) {
-                            throw new RuntimeException("Insufficient stock for product: " + product.getName());
-                        }
-
-                        // Reserve stock
-                        product.setStock(product.getStock() - cartItem.getQuantity());
-                        productRepo.save(product);
-
-                        OrderItem orderItem = OrderItem.builder()
-                                .order(order)
-                                .product(product)
-                                .quantity(cartItem.getQuantity())
-                                .priceAtPurchase(cartItem.getPrice())
-                                .vendor(product.getVendor())
-                                .totalPrice(cartItem.getPrice()) // Ensure totalPrice is set if OrderItem expects it
-                                .build();
-                        orderItems.add(orderItem);
-                    } finally {
-                        lock.unlock();
-                    }
-                } else {
-                    throw new RuntimeException(
-                            "Could not acquire lock for product: " + cartItem.getProduct().getName());
+            boolean reserved = redisStockService.reserveStock(
+                    cartItem.getProduct().getId(),
+                    cartItem.getQuantity()
+            );
+            if (!reserved) {
+                for (CartItem reservedItem : reservedItems) {
+                    redisStockService.incrementStock(
+                            reservedItem.getProduct().getId(),
+                            reservedItem.getQuantity()
+                    );
                 }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new RuntimeException("Thread was interrupted while waiting for lock");
+                throw new RuntimeException(
+                        "Insufficient stock for product: " + cartItem.getProduct().getName()
+                );
             }
+            reservedItems.add(cartItem);
+            Product product = productRepo.findById(cartItem.getProduct().getId())
+                    .orElseThrow(() -> new RuntimeException("Product not found: " + cartItem.getProduct().getName()));
+
+//            if (product.getStock() < cartItem.getQuantity()) {
+//                throw new RuntimeException("Insufficient stock for product: " + product.getName());
+//            }
+
+            // Reserve stock
+            try {
+                product.setStock(product.getStock() - cartItem.getQuantity());
+                productRepo.save(product);
+            } catch (Exception e) {
+                redisStockService.incrementStock(
+                        cartItem.getProduct().getId(),
+                        cartItem.getQuantity()
+                );
+                throw e;
+            }
+
+
+            OrderItem orderItem = OrderItem.builder()
+                    .order(order)
+                    .product(product)
+                    .quantity(cartItem.getQuantity())
+                    .priceAtPurchase(cartItem.getPrice())
+                    .vendor(product.getVendor())
+                    .totalPrice(cartItem.getPrice()) // Ensure totalPrice is set if OrderItem expects it
+                    .build();
+            orderItems.add(orderItem);
         }
 
         order.setItems(orderItems);
@@ -131,6 +139,8 @@ public class OrderService {
         if (status == OrderStatus.CANCELLED) {
             // Release stock
             for (OrderItem item : order.getItems()) {
+                redisStockService.incrementStock(item.getProduct().getId(),
+                        item.getQuantity());
                 Product product = item.getProduct();
                 product.setStock(product.getStock() + item.getQuantity());
                 productRepo.save(product);
@@ -141,6 +151,7 @@ public class OrderService {
     }
 
     public OrderDto cancelOrder(Long orderId) {
+
         return updateOrderStatus(orderId, OrderStatus.CANCELLED);
     }
 

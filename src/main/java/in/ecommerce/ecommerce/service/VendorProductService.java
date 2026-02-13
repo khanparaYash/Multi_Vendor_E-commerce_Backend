@@ -7,6 +7,7 @@ import in.ecommerce.ecommerce.entity.ProductStatus;
 import in.ecommerce.ecommerce.entity.Vendor;
 import in.ecommerce.ecommerce.repo.ProductRepo;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -79,15 +80,7 @@ public class VendorProductService {
         productRepo.delete(product);
     }
 
-    // Fix: Use vendor ID from context as key or just don't cache here if context is
-    // not available in key.
-    // Since we get vendor from service, we can't easily put it in key unless we
-    // pass it.
-    // Better to remove @Cacheable here or use a custom key generator that looks at
-    // SecurityContext.
-    // For now, I will remove @Cacheable from here to avoid the bug, as it's less
-    // critical than correctness.
-    // @Cacheable("products")
+    @Cacheable("products")
     public List<ProductDto> getMyProducts() {
         Vendor vendor = vendorService.getVendorEntity();
         return productRepo.findByVendorId(vendor.getId()).stream()
