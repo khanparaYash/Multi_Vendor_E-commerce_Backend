@@ -15,4 +15,7 @@ public class PaymentDto {
     private String status;
     private Double amount;
     private String paymentReference;
+    private String clientSecret;
+    private String paymentIntentId;
+    private String currency;
 }

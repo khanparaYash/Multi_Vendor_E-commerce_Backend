@@ -7,13 +7,14 @@ import in.ecommerce.ecommerce.entity.*;
 import in.ecommerce.ecommerce.repo.CartRepo;
 import in.ecommerce.ecommerce.repo.OrderRepo;
 import in.ecommerce.ecommerce.repo.ProductRepo;
-import in.ecommerce.ecommerce.repo.UserRepo;
 import lombok.RequiredArgsConstructor;
+
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.time.LocalDateTime;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -23,153 +24,176 @@ public class OrderService {
     private final OrderRepo orderRepo;
     private final CartRepo cartRepo;
     private final ProductRepo productRepo;
-    private final UserRepo userRepo;
     private final RedisStockService redisStockService;
 
+    // ===========================
+    // CREATE ORDER
+    // ===========================
     @Transactional
     public OrderDto createOrder(Long userId) {
+
         Cart cart = cartRepo.findByUserId(userId)
-                .orElseThrow(() -> new RuntimeException("Cart not found"));
+                .orElseThrow(() -> new IllegalStateException("Cart not found"));
 
         if (cart.getItems().isEmpty()) {
-            throw new RuntimeException("Cart is empty");
+            throw new IllegalStateException("Cart is empty");
         }
+
+        // Prevent duplicate PAYMENT_PENDING orders
+        // boolean existingPendingOrder =
+        //         orderRepo.existsByUserIdAndStatusIn(
+        //                 userId,
+        //                 List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING)
+        //         );
+
+        // if (existingPendingOrder) {
+        //     throw new IllegalStateException("You already have a pending order.");
+        // }
 
         Order order = Order.builder()
                 .user(cart.getUser())
                 .status(OrderStatus.CREATED)
                 .totalAmount(cart.getTotalPrice())
+                .reservedUntil(LocalDateTime.now().plusMinutes(15))
                 .items(new ArrayList<>())
                 .build();
 
         List<OrderItem> orderItems = new ArrayList<>();
-        List<CartItem> reservedItems = new ArrayList<>();
-        for (CartItem cartItem : cart.getItems()) {
-            // 🔥 Lock and Refresh Product State
 
+        for (CartItem cartItem : cart.getItems()) {
+
+            Long productId = cartItem.getProduct().getId();
+
+            // 1️⃣ Redis Reservation (Fast Layer)
             boolean reserved = redisStockService.reserveStock(
-                    cartItem.getProduct().getId(),
+                    productId,
                     cartItem.getQuantity()
             );
+
             if (!reserved) {
-                for (CartItem reservedItem : reservedItems) {
-                    redisStockService.incrementStock(
-                            reservedItem.getProduct().getId(),
-                            reservedItem.getQuantity()
-                    );
-                }
-                throw new RuntimeException(
-                        "Insufficient stock for product: " + cartItem.getProduct().getName()
+                rollbackRedisReservations(orderItems);
+                throw new IllegalStateException(
+                        "Insufficient stock for product: "
+                                + cartItem.getProduct().getName()
                 );
             }
-            reservedItems.add(cartItem);
-            Product product = productRepo.findById(cartItem.getProduct().getId())
-                    .orElseThrow(() -> new RuntimeException("Product not found: " + cartItem.getProduct().getName()));
 
-//            if (product.getStock() < cartItem.getQuantity()) {
-//                throw new RuntimeException("Insufficient stock for product: " + product.getName());
-//            }
+            // 2️⃣ DB Lock (Strong Consistency)
+            Product product = productRepo.findByIdForUpdate(productId)
+                    .orElseThrow(() -> new IllegalStateException("Product not found"));
 
-            // Reserve stock
-            try {
-                product.setStock(product.getStock() - cartItem.getQuantity());
-                productRepo.save(product);
-            } catch (Exception e) {
-                redisStockService.incrementStock(
-                        cartItem.getProduct().getId(),
-                        cartItem.getQuantity()
+            if (product.getStock() < cartItem.getQuantity()) {
+                redisStockService.incrementStock(productId, cartItem.getQuantity());
+                throw new IllegalStateException(
+                        "Stock mismatch for product: " + product.getName()
                 );
-                throw e;
             }
 
+            product.setStock(product.getStock() - cartItem.getQuantity());
 
             OrderItem orderItem = OrderItem.builder()
                     .order(order)
                     .product(product)
+                    .vendor(product.getVendor())
                     .quantity(cartItem.getQuantity())
                     .priceAtPurchase(cartItem.getPrice())
-                    .vendor(product.getVendor())
-                    .totalPrice(cartItem.getPrice()) // Ensure totalPrice is set if OrderItem expects it
+                    .totalPrice(cartItem.getPrice() * cartItem.getQuantity())
                     .build();
+
             orderItems.add(orderItem);
         }
 
         order.setItems(orderItems);
+
         Order savedOrder = orderRepo.save(order);
 
-        // Clear cart
-        cart.getItems().clear();
-        cart.setTotalPrice(0.0);
-        cartRepo.save(cart);
+        clearCart(cart);
 
         return mapToDto(savedOrder);
     }
 
-    public OrderDto getOrder(Long orderId) {
-        Order order = orderRepo.findById(orderId)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
-        return mapToDto(order);
+    private void rollbackRedisReservations(List<OrderItem> items) {
+        for (OrderItem item : items) {
+            redisStockService.incrementStock(
+                    item.getProduct().getId(),
+                    item.getQuantity()
+            );
+        }
     }
 
-    public List<OrderDto> getCustomerOrders(Long userId) {
-        return orderRepo.findByUserId(userId).stream()
-                .map(this::mapToDto)
-                .collect(Collectors.toList());
+    private void clearCart(Cart cart) {
+        cart.getItems().clear();
+        cart.setTotalPrice(0.0);
+        cartRepo.save(cart);
     }
 
-    public List<OrderDto> getVendorOrders(Long vendorId) {
-        return orderRepo.findByItems_Product_Vendor_Id(vendorId).stream()
-                .map(this::mapToDto)
-                .collect(Collectors.toList());
-    }
-
-    public List<OrderDto> getAllOrders() {
-        return orderRepo.findAll().stream()
-                .map(this::mapToDto)
-                .collect(Collectors.toList());
-    }
-
+    // ===========================
+    // UPDATE STATUS (STATE MACHINE)
+    // ===========================
     @Transactional
-    public OrderDto updateOrderStatus(Long orderId, OrderStatus status) {
-        Order order = orderRepo.findById(orderId)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
+    public OrderDto updateOrderStatus(Long orderId, OrderStatus newStatus) {
 
-        // Add valid transitions logic if needed
-        order.setStatus(status);
-        if (status == OrderStatus.CANCELLED) {
-            // Release stock
-            for (OrderItem item : order.getItems()) {
-                redisStockService.incrementStock(item.getProduct().getId(),
-                        item.getQuantity());
-                Product product = item.getProduct();
-                product.setStock(product.getStock() + item.getQuantity());
-                productRepo.save(product);
-            }
+        Order order = orderRepo.findById(orderId)
+                .orElseThrow(() -> new IllegalStateException("Order not found"));
+
+        validateStateTransition(order.getStatus(), newStatus);
+
+        order.setStatus(newStatus);
+
+        if (newStatus == OrderStatus.CANCELLED) {
+            releaseStock(order);
         }
 
         return mapToDto(orderRepo.save(order));
     }
 
-    public OrderDto cancelOrder(Long orderId) {
+    private void validateStateTransition(OrderStatus current, OrderStatus next) {
 
-        return updateOrderStatus(orderId, OrderStatus.CANCELLED);
+        Map<OrderStatus, List<OrderStatus>> validTransitions = Map.of(
+                OrderStatus.CREATED, List.of(OrderStatus.PAYMENT_PENDING, OrderStatus.CANCELLED),
+                OrderStatus.PAYMENT_PENDING, List.of(OrderStatus.PAID, OrderStatus.CANCELLED),
+                OrderStatus.PAID, List.of(OrderStatus.SHIPPED, OrderStatus.CANCELLED),
+                OrderStatus.SHIPPED, List.of(OrderStatus.DELIVERED),
+                OrderStatus.DELIVERED, List.of(),
+                OrderStatus.CANCELLED, List.of()
+        );
+
+        if (!validTransitions.getOrDefault(current, List.of()).contains(next)) {
+            throw new IllegalStateException(
+                    "Invalid state transition: " + current + " → " + next
+            );
+        }
     }
 
+    private void releaseStock(Order order) {
+        for (OrderItem item : order.getItems()) {
+
+            redisStockService.incrementStock(
+                    item.getProduct().getId(),
+                    item.getQuantity()
+            );
+
+            Product product = productRepo.findByIdForUpdate(
+                    item.getProduct().getId()
+            ).orElseThrow();
+
+            product.setStock(product.getStock() + item.getQuantity());
+        }
+    }
+
+    // ===========================
+    // SHIPPING
+    // ===========================
     @Transactional
     public OrderDto shipOrder(Long orderId, Long vendorId) {
+
         Order order = orderRepo.findById(orderId)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
+                .orElseThrow(() -> new IllegalStateException("Order not found"));
 
-        // Verify vendor is part of this order
-        boolean isVendorInOrder = order.getItems().stream()
-                .anyMatch(item -> item.getProduct().getVendor().getId().equals(vendorId));
-
-        if (!isVendorInOrder) {
-            throw new RuntimeException("Vendor is not authorized to ship this order");
-        }
+        validateVendorOwnership(order, vendorId);
 
         if (order.getStatus() != OrderStatus.PAID) {
-            throw new RuntimeException("Order cannot be shipped. Current status: " + order.getStatus());
+            throw new IllegalStateException("Order must be PAID before shipping.");
         }
 
         order.setStatus(OrderStatus.SHIPPED);
@@ -178,27 +202,53 @@ public class OrderService {
 
     @Transactional
     public OrderDto deliverOrder(Long orderId, Long vendorId) {
+
         Order order = orderRepo.findById(orderId)
-                .orElseThrow(() -> new RuntimeException("Order not found"));
+                .orElseThrow(() -> new IllegalStateException("Order not found"));
 
-        // Verify vendor is part of this order
-        boolean isVendorInOrder = order.getItems().stream()
-                .anyMatch(item -> item.getProduct().getVendor().getId().equals(vendorId));
-
-        if (!isVendorInOrder) {
-            throw new RuntimeException("Vendor is not authorized to deliver this order");
-        }
+        validateVendorOwnership(order, vendorId);
 
         if (order.getStatus() != OrderStatus.SHIPPED) {
-            throw new RuntimeException("Order cannot be delivered. Current status: " + order.getStatus());
+            throw new IllegalStateException("Order must be SHIPPED before delivery.");
         }
 
         order.setStatus(OrderStatus.DELIVERED);
         return mapToDto(orderRepo.save(order));
     }
 
+    private void validateVendorOwnership(Order order, Long vendorId) {
+        boolean authorized = order.getItems().stream()
+                .anyMatch(i -> i.getVendor().getId().equals(vendorId));
+
+        if (!authorized) {
+            throw new IllegalStateException("Vendor not authorized for this order.");
+        }
+    }
+
+    // ===========================
+    // EXPIRED ORDER CLEANUP
+    // ===========================
+    @Transactional
+    @Scheduled(fixedRate = 60000) 
+    public void cancelExpiredOrders() {
+
+        List<Order> expiredOrders =
+                orderRepo.findByStatusInAndReservedUntilBefore(
+                        List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING),
+                        LocalDateTime.now()
+                );
+
+        for (Order order : expiredOrders) {
+            updateOrderStatus(order.getId(), OrderStatus.CANCELLED);
+        }
+    }
+
+    // ===========================
+    // MAPPING
+    // ===========================
     private OrderDto mapToDto(Order order) {
-        List<OrderItemDto> itemDtos = order.getItems().stream()
+
+        List<OrderItemDto> items = order.getItems().stream()
                 .map(item -> OrderItemDto.builder()
                         .id(item.getId())
                         .productId(item.getProduct().getId())
@@ -214,7 +264,7 @@ public class OrderService {
                 .totalAmount(order.getTotalAmount())
                 .status(order.getStatus().name())
                 .createdAt(order.getCreatedAt())
-                .items(itemDtos)
+                .items(items)
                 .build();
     }
 }

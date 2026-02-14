@@ -102,7 +102,7 @@ public class CustomerController {
         if (!order.getUserId().equals(getCurrentUserId())) {
             throw new RuntimeException("Access Denied");
         }
-        return ResponseEntity.ok(paymentService.processPayment(orderId));
+        return ResponseEntity.ok(paymentService.createPaymentIntent(orderId));
     }
 
     // --- Review APIs ---

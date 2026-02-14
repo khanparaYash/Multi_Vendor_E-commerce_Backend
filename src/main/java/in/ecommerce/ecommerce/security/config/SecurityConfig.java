@@ -19,7 +19,8 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity // with this we can use @PreAuthorize(       ) in all method for authority like admin or user
+@EnableMethodSecurity // with this we can use @PreAuthorize( ) in all method for authority like admin
+                      // or user
 public class SecurityConfig {
 
     @Autowired
@@ -31,7 +32,7 @@ public class SecurityConfig {
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
 
         return http.csrf(customizer -> customizer.disable()).authorizeHttpRequests(request -> request
-                .requestMatchers("/login", "/register").permitAll()
+                .requestMatchers("/login", "/register", "/stripe/webhook").permitAll()
                 .anyRequest().authenticated()).
         // formLogin(Customizer.withDefaults()). //is give form in ui for login
                 httpBasic(Customizer.withDefaults()). // login with postman

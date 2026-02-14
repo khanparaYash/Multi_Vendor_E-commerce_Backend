@@ -1,19 +1,21 @@
 package in.ecommerce.ecommerce.service;
 
+import com.stripe.Stripe;
+import com.stripe.exception.StripeException;
+import com.stripe.model.PaymentIntent;
+import com.stripe.param.PaymentIntentCreateParams;
 import in.ecommerce.ecommerce.DTO.PaymentDto;
 import in.ecommerce.ecommerce.entity.Order;
 import in.ecommerce.ecommerce.entity.OrderStatus;
 import in.ecommerce.ecommerce.entity.Payment;
 import in.ecommerce.ecommerce.entity.PaymentStatus;
-import in.ecommerce.ecommerce.entity.Product;
 import in.ecommerce.ecommerce.repo.OrderRepo;
 import in.ecommerce.ecommerce.repo.PaymentRepo;
-import in.ecommerce.ecommerce.repo.ProductRepo;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
-import java.util.UUID;
 
 @Service
 @RequiredArgsConstructor
@@ -21,10 +23,20 @@ public class PaymentService {
 
     private final PaymentRepo paymentRepo;
     private final OrderRepo orderRepo;
-    private final ProductRepo productRepo;
+
+    @Value("${stripe.secret.key}")
+    private String stripeSecretKey;
+
+    @Value("${app.name}")
+    private String appName;
+
+    @PostConstruct
+    public void init() {
+        Stripe.apiKey = stripeSecretKey;
+    }
 
     @Transactional
-    public PaymentDto processPayment(Long orderId) {
+    public PaymentDto createPaymentIntent(Long orderId) {
         Order order = orderRepo.findById(orderId)
                 .orElseThrow(() -> new RuntimeException("Order not found"));
 
@@ -32,46 +44,43 @@ public class PaymentService {
             throw new RuntimeException("Order is not in valid state for payment");
         }
 
-        // Simulate payment (success/fail logic could be random or based on input, here
-        // we assume success for simplicity unless configured otherwise)
-        boolean paymentSuccess = true;
+        try {
+            PaymentIntentCreateParams params = PaymentIntentCreateParams.builder()
+                    .setAmount((long) (order.getTotalAmount() * 100)) // Amount in cents
+                    .setCurrency("usd") // Adjust currency as needed
+                    .setAutomaticPaymentMethods(
+                            PaymentIntentCreateParams.AutomaticPaymentMethods.builder()
+                                    .setEnabled(true)
+                                    .build())
+                    .putMetadata("order_id", String.valueOf(order.getId()))
+                    .putMetadata("app_name", appName)
+                    .build();
 
-        Payment payment = Payment.builder()
-                .order(order)
-                .amount(order.getTotalAmount())
-                .paymentReference(UUID.randomUUID().toString())
-                .paymentStatus(paymentSuccess ? PaymentStatus.SUCCESS : PaymentStatus.FAILED)
-                .build();
+            PaymentIntent paymentIntent = PaymentIntent.create(params);
 
-        paymentRepo.save(payment);
+            // Create a pending payment record
+            Payment payment = Payment.builder()
+                    .order(order)
+                    .amount(order.getTotalAmount())
+                    .paymentReference(paymentIntent.getId())
+                    .paymentStatus(PaymentStatus.PENDING) // Initial status
+                    .build();
 
-        if (paymentSuccess) {
-            order.setStatus(OrderStatus.PAID);
-        } else {
-            order.setStatus(OrderStatus.PAYMENT_PENDING); // Or CANCELLED if strict
-            // If we want to release stock on failure, we should do it here if we consider
-            // this final.
-            // But usually we allow retries.
-            // Requirement says: "If payment fails -> release reserved stock."
-            // This is harsh for a pending payment, but let's follow requirement if it
-            // implies immediate failure.
-            // "If status -> keep as PAYMENT_PENDING". So maybe we don't release stock yet?
-            // "Ensure: Stock was reserved earlier. If payment fails -> release reserved
-            // stock."
-            // Contradiction: "If failure -> keep as PAYMENT_PENDING". If pending, stock
-            // should be held?
-            // I'll assume "Final Failure" implies release. For now, let's keep it pending.
+            paymentRepo.save(payment);
+
+            return PaymentDto.builder()
+                    .id(payment.getId())
+                    .orderId(order.getId())
+                    .status(payment.getPaymentStatus().name())
+                    .amount(payment.getAmount())
+                    .paymentReference(payment.getPaymentReference())
+                    .clientSecret(paymentIntent.getClientSecret())
+                    .paymentIntentId(paymentIntent.getId())
+                    .currency(paymentIntent.getCurrency())
+                    .build();
+
+        } catch (StripeException e) {
+            throw new RuntimeException("Error creating payment intent: " + e.getMessage(), e);
         }
-
-        orderRepo.save(order);
-
-        return PaymentDto.builder()
-                .id(payment.getId())
-                .orderId(order.getId())
-                .status(payment.getPaymentStatus().name())
-                .amount(payment.getAmount())
-                .paymentReference(payment.getPaymentReference())
-                .build();
-
     }
 }

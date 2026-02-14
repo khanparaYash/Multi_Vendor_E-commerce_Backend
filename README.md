@@ -30,11 +30,124 @@ A robust and scalable backend for a Multi-Vendor E-commerce marketplace built wi
 *   **Platform Orders:** View and manage all orders across the platform; ability to cancel orders.
 *   **Coupon Management:** Create and manage promotional codes.
 
+## 🔄 Application Workflows
+
+### 1. Vendor Onboarding Flow
+
+#### Step 1: Registration
+*   **Action**: User signs up as a Vendor.
+*   **API**: `POST /register` (with role `VENDOR`)
+*   **Backend Logic**:
+    *   Creates a `User` record with role `VENDOR`.
+    *   Creates a `Vendor` profile linked to the user.
+    *   Sets Vendor Status to `PENDING`.
+*   **Outcome**: User can login but cannot manage products yet.
+
+#### Step 2: Admin Approval
+*   **Action**: Admin reviews pending vendor applications.
+*   **API**: `PUT /admin/vendors/{id}/approve`
+*   **Pre-conditions**: Authenticated as `ADMIN`.
+*   **Backend Logic**:
+    *   Updates Vendor Status to `APPROVED`.
+    *   Enables the user account if it was locked.
+*   **Outcome**: Vendor gains access to product management dashboards.
+
+#### Step 3: Product Listing
+*   **Action**: Vendor adds products to the marketplace.
+*   **API**: `POST /vendor/products`
+*   **Pre-conditions**: Vendor Status must be `APPROVED`.
+*   **Backend Logic**:
+    *   Validates product details (price, stock).
+    *   Links product to the specific Vendor.
+*   **Outcome**: Product becomes visible in the marketplace.
+
+### 2. Order Fulfillment Lifecycle
+
+#### Step 1: Shopping & Checkout
+*   **Action**: Customer adds items to cart and places order.
+*   **API**: `POST /customer/order/create`
+*   **Backend Logic**:
+    *   Validates stock availability in **Redis**.
+    *   **Locking**: Acquires a lock on product/stock to prevent race conditions.
+    *   **Reservation**: Decrements stock in Redis and DB.
+    *   Creates `Order` with status `CREATED`.
+    *   Clears the user's Cart.
+*   **Outcome**: Order created, stock reserved.
+
+#### Step 2: Payment (See Detailed Payment Workflow below)
+*   **Action**: Customer pays for the order.
+*   **Outcome**: Order Status becomes `PAID`.
+
+#### Step 3: Shipping
+*   **Action**: Vendor views new paid orders and ships them.
+*   **API**: `PUT /vendor/orders/{id}/ship`
+*   **Pre-conditions**:
+    *   Order Status must be `PAID`.
+    *   Vendor must own the products in the order.
+*   **Backend Logic**:
+    *   Updates Order Status to `SHIPPED`.
+    *   (Optional) Triggers email notification to Customer.
+
+#### Step 4: Delivery
+*   **Action**: Vendor or Logistics Partner marks order as delivered.
+*   **API**: `PUT /vendor/orders/{id}/deliver`
+*   **Backend Logic**:
+    *   Updates Order Status to `DELIVERED`.
+    *   **Wallet Update**: Credits the Vendor's wallet with the sale amount (platform fees logic can be added here).
+*   **Outcome**: Transaction complete. User can now leave a review.
+
+### 3. Payment Workflow (Stripe Integration)
+The system uses **Stripe PaymentIntents** and **Webhooks** for secure payment processing.
+
+#### Step 1: User Initiates Payment
+*   **Action**: Customer clicks "Pay Now" for an Order.
+*   **API**: `POST /customer/payment/{orderId}`
+*   **Pre-conditions**:
+    *   User must be authenticated (`CUSTOMER` role).
+    *   Order must exist and belong to the user.
+    *   Order Status must be `CREATED` or `PAYMENT_PENDING`.
+*   **Backend Logic**:
+    1.  Calculates total order amount.
+    2.  Creates a **Stripe PaymentIntent** via API.
+    3.  Attaches **Metadata**:
+        *   `order_id`: To link the payment to the order.
+        *   `app_name`: To identify the application (for multi-project support).
+    4.  Creates a local `Payment` record with status `PENDING`.
+    5.  Updates Order Status to `PAYMENT_PENDING`.
+*   **Response**: Returns `clientSecret` and `paymentIntentId`.
+
+#### Step 2: Frontend Processing
+*   **Action**: Frontend uses the `clientSecret` with **Stripe.js**.
+*   **Logic**: Calls `stripe.confirmCardPayment(clientSecret)` to securely handle card details.
+*   **Outcome**: Stripe processes the payment.
+
+#### Step 3: Webhook Verification
+*   **Event**: Stripe sends a webhook event to the backend.
+*   **API**: `POST /stripe/webhook` (Public Endpoint)
+*   **Security**:
+    1.  **Signature Verification**: Backend verifies `Stripe-Signature` header using the configured `stripe.webhook.secret`.
+    2.  **App Verification**: Backend checks `app.name` metadata. If it doesn't match the configured `app.name`, the event is ignored (allowing multiple apps to use the same Stripe account).
+
+#### Step 4: Completion & Status Updates
+*   **Scenario A: Payment Succeeded (`payment_intent.succeeded`)**
+    *   Finds `Payment` record by `paymentIntentId`.
+    *   **Check**: If payment is already `SUCCESS`, logs and skips (idempotency).
+    *   Updates `Payment` Status to `SUCCESS`.
+    *   Updates `Order` Status to **`PAID`**.
+    *   Logs success.
+*   **Scenario B: Payment Failed (`payment_intent.payment_failed`)**
+    *   Updates `Payment` Status to `FAILED`.
+    *   Order Status remains `PAYMENT_PENDING` (user can retry with a different card).
+    *   Logs failure.
+
+
+
+
 ## 🏗️ Engineering Highlights
 
 This project demonstrates **System Design** principles and **Clean Architecture**:
 
-*   **Concurrency Control**: Implements **Pessimistic Locking** (`PESSIMISTIC_WRITE`) on product inventory during order creation. This ensures data integrity and prevents overselling even under high contention (e.g., 200 users vying for 10 items).
+*   **Concurrency Control**: Uses **Redis** for high-performance stock reservation combined with **Pessimistic Locking** (`PESSIMISTIC_WRITE`) on the database. This dual-layer approach ensures data integrity and prevents overselling under extreme load.
 *   **Transactional Integrity**: Uses `@Transactional` boundaries to ensure that Order creation, Stock deduction, and Cart clearing happen atomically. If any step fails, the entire transaction rolls back.
 *   **Security Enforcement**:
     *   **RBAC**: Fine-grained `hasRole()` and `hasAuthority()` checks at the controller level.
@@ -54,7 +167,9 @@ This project demonstrates **System Design** principles and **Clean Architecture*
 *   **Language:** Java 17
 *   **Database:** PostgreSQL
 *   **Authentication:** Spring Security with JWT (jjwt 0.12.6)
+*   **Caching:** Redis & Spring Cache
 *   **Build Tool:** Maven
+
 
 ---
 
@@ -64,6 +179,7 @@ This project demonstrates **System Design** principles and **Clean Architecture*
 *   Java 17 Development Kit (JDK)
 *   Maven 3.8+
 *   PostgreSQL Database
+*   **Stripe Account** (Secret Key & Webhook Secret)
 
 ### Steps
 
@@ -80,6 +196,11 @@ This project demonstrates **System Design** principles and **Clean Architecture*
     spring.datasource.url=jdbc:postgresql://localhost:5432/ecommerce
     spring.datasource.username=postgres
     spring.datasource.password=your_password
+    
+    # Stripe Configuration
+    stripe.secret.key=sk_test_...
+    stripe.webhook.secret=whsec_...
+    app.name=ecommerce
     ```
 
 3.  **Build the Application**
@@ -92,6 +213,14 @@ This project demonstrates **System Design** principles and **Clean Architecture*
     ./mvnw spring-boot:run
     ```
     The application will start on `http://localhost:8080`.
+
+5.  **Default Data (Data Seeder)**
+    The application automatically seeds the database with sample users and products on startup if they don't exist.
+
+    **Default Credentials:**
+    *   **Admin:** `admin@example.com` / `admin123`
+    *   **Vendor:** `vendor@example.com` / `vendor123`
+    *   **Customer:** `customer@example.com` / `customer123`
 
 ---
 
