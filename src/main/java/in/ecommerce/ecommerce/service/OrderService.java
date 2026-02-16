@@ -41,13 +41,13 @@ public class OrderService {
 
         // Prevent duplicate PAYMENT_PENDING orders
         // boolean existingPendingOrder =
-        //         orderRepo.existsByUserIdAndStatusIn(
-        //                 userId,
-        //                 List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING)
-        //         );
+        // orderRepo.existsByUserIdAndStatusIn(
+        // userId,
+        // List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING)
+        // );
 
         // if (existingPendingOrder) {
-        //     throw new IllegalStateException("You already have a pending order.");
+        // throw new IllegalStateException("You already have a pending order.");
         // }
 
         Order order = Order.builder()
@@ -67,15 +67,13 @@ public class OrderService {
             // 1️⃣ Redis Reservation (Fast Layer)
             boolean reserved = redisStockService.reserveStock(
                     productId,
-                    cartItem.getQuantity()
-            );
+                    cartItem.getQuantity());
 
             if (!reserved) {
                 rollbackRedisReservations(orderItems);
                 throw new IllegalStateException(
                         "Insufficient stock for product: "
-                                + cartItem.getProduct().getName()
-                );
+                                + cartItem.getProduct().getName());
             }
 
             // 2️⃣ DB Lock (Strong Consistency)
@@ -85,8 +83,7 @@ public class OrderService {
             if (product.getStock() < cartItem.getQuantity()) {
                 redisStockService.incrementStock(productId, cartItem.getQuantity());
                 throw new IllegalStateException(
-                        "Stock mismatch for product: " + product.getName()
-                );
+                        "Stock mismatch for product: " + product.getName());
             }
 
             product.setStock(product.getStock() - cartItem.getQuantity());
@@ -116,8 +113,7 @@ public class OrderService {
         for (OrderItem item : items) {
             redisStockService.incrementStock(
                     item.getProduct().getId(),
-                    item.getQuantity()
-            );
+                    item.getQuantity());
         }
     }
 
@@ -155,13 +151,11 @@ public class OrderService {
                 OrderStatus.PAID, List.of(OrderStatus.SHIPPED, OrderStatus.CANCELLED),
                 OrderStatus.SHIPPED, List.of(OrderStatus.DELIVERED),
                 OrderStatus.DELIVERED, List.of(),
-                OrderStatus.CANCELLED, List.of()
-        );
+                OrderStatus.CANCELLED, List.of());
 
         if (!validTransitions.getOrDefault(current, List.of()).contains(next)) {
             throw new IllegalStateException(
-                    "Invalid state transition: " + current + " → " + next
-            );
+                    "Invalid state transition: " + current + " → " + next);
         }
     }
 
@@ -170,12 +164,10 @@ public class OrderService {
 
             redisStockService.incrementStock(
                     item.getProduct().getId(),
-                    item.getQuantity()
-            );
+                    item.getQuantity());
 
             Product product = productRepo.findByIdForUpdate(
-                    item.getProduct().getId()
-            ).orElseThrow();
+                    item.getProduct().getId()).orElseThrow();
 
             product.setStock(product.getStock() + item.getQuantity());
         }
@@ -226,17 +218,58 @@ public class OrderService {
     }
 
     // ===========================
+    // VENDOR ORDERS
+    // ===========================
+    @Transactional(readOnly = true)
+    public List<OrderDto> getVendorOrders(Long vendorId) {
+        List<Order> orders = orderRepo.findByItems_Product_Vendor_Id(vendorId);
+        return orders.stream()
+                .map(this::mapToDto)
+                .collect(Collectors.toList());
+    }
+
+    // ===========================
+    // CUSTOMER ORDERS
+    // ===========================
+    @Transactional(readOnly = true)
+    public List<OrderDto> getCustomerOrders(Long userId) {
+        return orderRepo.findByUserId(userId).stream()
+                .map(this::mapToDto)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional(readOnly = true)
+    public OrderDto getOrder(Long orderId) {
+        Order order = orderRepo.findById(orderId)
+                .orElseThrow(() -> new IllegalStateException("Order not found with ID: " + orderId));
+        return mapToDto(order);
+    }
+
+    // ===========================
+    // ADMIN ORDERS
+    // ===========================
+    @Transactional(readOnly = true)
+    public List<OrderDto> getAllOrders() {
+        return orderRepo.findAll().stream()
+                .map(this::mapToDto)
+                .collect(Collectors.toList());
+    }
+
+    @Transactional
+    public OrderDto cancelOrder(Long orderId) {
+        return updateOrderStatus(orderId, OrderStatus.CANCELLED);
+    }
+
+    // ===========================
     // EXPIRED ORDER CLEANUP
     // ===========================
     @Transactional
-    @Scheduled(fixedRate = 60000) 
+    @Scheduled(fixedRate = 60000)
     public void cancelExpiredOrders() {
 
-        List<Order> expiredOrders =
-                orderRepo.findByStatusInAndReservedUntilBefore(
-                        List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING),
-                        LocalDateTime.now()
-                );
+        List<Order> expiredOrders = orderRepo.findByStatusInAndReservedUntilBefore(
+                List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING),
+                LocalDateTime.now());
 
         for (Order order : expiredOrders) {
             updateOrderStatus(order.getId(), OrderStatus.CANCELLED);

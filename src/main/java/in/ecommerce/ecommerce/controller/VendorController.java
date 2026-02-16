@@ -1,6 +1,7 @@
 package in.ecommerce.ecommerce.controller;
 
 import in.ecommerce.ecommerce.DTO.*;
+import in.ecommerce.ecommerce.service.OrderService;
 import in.ecommerce.ecommerce.service.VendorProductService;
 import in.ecommerce.ecommerce.service.VendorService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -64,7 +65,7 @@ public class VendorController {
 
     // --- Order Management ---
     @Autowired
-    private in.ecommerce.ecommerce.service.OrderService orderService;
+    private OrderService orderService;
 
     @GetMapping("/orders")
     public ResponseEntity<List<OrderDto>> getVendorOrders() {

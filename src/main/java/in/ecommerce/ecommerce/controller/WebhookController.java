@@ -11,6 +11,7 @@ import in.ecommerce.ecommerce.repo.OrderRepo;
 import in.ecommerce.ecommerce.repo.PaymentRepo;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -19,12 +20,13 @@ import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/stripe/webhook")
-@RequiredArgsConstructor
+
 @Slf4j
 public class WebhookController {
-
-    private final PaymentRepo paymentRepo;
-    private final OrderRepo orderRepo;
+    @Autowired
+    private  PaymentRepo paymentRepo;
+    @Autowired
+    private  OrderRepo orderRepo;
 
     @Value("${stripe.webhook.secret}")
     private String endpointSecret;

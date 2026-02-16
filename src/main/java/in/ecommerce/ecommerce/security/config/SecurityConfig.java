@@ -31,12 +31,15 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
 
-        return http.csrf(customizer -> customizer.disable()).authorizeHttpRequests(request -> request
-                .requestMatchers("/login", "/register", "/stripe/webhook").permitAll()
-                .anyRequest().authenticated()).
-        // formLogin(Customizer.withDefaults()). //is give form in ui for login
-                httpBasic(Customizer.withDefaults()). // login with postman
-                sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        return http.csrf(customizer -> customizer.disable())
+                .cors(Customizer.withDefaults()) // Enable CORS
+                .authorizeHttpRequests(request -> request
+                        .requestMatchers("/login", "/register","/public/products", "/stripe/webhook", "/v3/api-docs/**", "/swagger-ui/**",
+                                "/swagger-ui.html" ) // Allow public endpoints
+                        .permitAll()
+                        .anyRequest().authenticated())
+                .httpBasic(Customizer.withDefaults())
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
                 .build();
     }

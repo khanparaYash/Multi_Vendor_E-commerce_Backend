@@ -13,11 +13,17 @@ import java.util.Optional;
 public interface ProductRepo extends JpaRepository<Product, Long> {
     List<Product> findByVendorId(Long vendorId);
 
+    org.springframework.data.domain.Page<Product> findByStatus(in.ecommerce.ecommerce.entity.ProductStatus status,
+            org.springframework.data.domain.Pageable pageable);
+
+    List<Product> findByStatus(in.ecommerce.ecommerce.entity.ProductStatus status);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT p FROM Product p WHERE p.id = :id")
     Optional<Product> findByIdWithLock(@Param("id") Long id);
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
-Optional<Product> findByIdForUpdate(Long id);
+    @Query("SELECT p FROM Product p WHERE p.id = :id")
+    Optional<Product> findByIdForUpdate(@Param("id") Long id);
 
 }

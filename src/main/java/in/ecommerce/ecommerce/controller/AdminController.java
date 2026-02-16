@@ -13,12 +13,16 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/admin")
-@RequiredArgsConstructor
 @PreAuthorize("hasRole('ADMIN')")
 public class AdminController {
 
     private final OrderService orderService;
     private final CouponService couponService;
+
+    public AdminController(OrderService orderService, CouponService couponService) {
+        this.orderService = orderService;
+        this.couponService = couponService;
+    }
 
     // --- Order Management ---
 

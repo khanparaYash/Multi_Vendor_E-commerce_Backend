@@ -147,8 +147,23 @@ The system uses **Stripe PaymentIntents** and **Webhooks** for secure payment pr
 
 This project demonstrates **System Design** principles and **Clean Architecture**:
 
-*   **Concurrency Control**: Uses **Redis** for high-performance stock reservation combined with **Pessimistic Locking** (`PESSIMISTIC_WRITE`) on the database. This dual-layer approach ensures data integrity and prevents overselling under extreme load.
-*   **Transactional Integrity**: Uses `@Transactional` boundaries to ensure that Order creation, Stock deduction, and Cart clearing happen atomically. If any step fails, the entire transaction rolls back.
+### 🛡️ Reliability & Concurrency
+
+*   **Distributed Locking (Database-Based)**:
+    *   The system implements distinct **Distributed Locking** mechanisms to ensure data integrity across multiple application instances.
+    *   **Implementation**: Leverages **Pessimistic Locking** (`PESSIMISTIC_WRITE`) on the database row for each product during checkout.
+    *   **Why it works**: Since the database acts as the single source of truth, this lock prevents race conditions (e.g., overselling stock) even when multiple backend instances are running in parallel. It is a robust alternative to Redis-based locking (Redlock) for strict consistency requirements.
+
+*   **Reservation Timeout (Auto-Expiry)**:
+    *   To prevent "stock hoarding" (users adding items to cart/order but never searching), the system implements an automatic **Reservation Timeout**.
+    *   **Mechanism**:
+        1.  When an Order is created, stock is reserved, and a `reservedUntil` timestamp is set (default: 15 minutes).
+        2.  A mostly-active **Scheduled Task** (`@Scheduled`) runs every 60 seconds to scan for orders that are still in `CREATED` or `PAYMENT_PENDING` state but have passed their reservation time.
+        3.  Expired orders are automatically **Cancelled**, and their stock is released back to the exact relevant Product and Redis cache immediately.
+
+*   **Dual-Layer Stock Management**:
+    *   **Layer 1 (Performance)**: Uses **Redis** for effectively instantaneous stock checks and tentative deductions.
+    *   **Layer 2 (Consistency)**: Uses **Database Transactions** (`@Transactional`) for the final, authoritative stock update, ensuring that money is never taken for out-of-stock items.
 *   **Security Enforcement**:
     *   **RBAC**: Fine-grained `hasRole()` and `hasAuthority()` checks at the controller level.
     *   **Stateful to Stateless**: Migrated from session-based to **JWT** (JSON Web Token) authentication for scalability.
@@ -225,6 +240,8 @@ This project demonstrates **System Design** principles and **Clean Architecture*
 ---
 
 ## 📡 API Documentation
+
+**Interactive API Docs (Swagger UI):** `http://localhost:8080/swagger-ui/index.html`
 
 ### 🔓 Public / Authentication
 | Method | Endpoint | Description |
