@@ -1,341 +1,322 @@
-# 🛍️ Spring Boot Multi-Vendor E-commerce Backend
+<div align="center">
+  <img src="https://images.unsplash.com/photo-1472851294608-062f824d29cc?q=80&w=1200&auto=format&fit=crop" alt="E-Commerce Marketplace Banner" width="100%" style="border-radius: 8px; margin-bottom: 20px;" />
 
-A robust and scalable backend for a Multi-Vendor E-commerce marketplace built with **Spring Boot**. This application supports comprehensive e-commerce workflows including multi-role user management (Admin, Vendor, Customer), secure authentication, product catalog, shopping cart, order processing, payments, reviews, and vendor-specific features.
+  # 🛍️ Spring Boot Multi-Vendor E-Commerce Platform
+  <p><strong>A production-grade, highly scalable backend engine for distributed multi-vendor marketplaces.</strong></p>
 
-## 🚀 Features
-
-### 🔐 User & Security
-*   **Role-Based Access Control (RBAC):**
-    *   **Admin:** Platform oversight, vendor approval, order management.
-    *   **Vendor:** Product management, order fulfillment, wallet tracking.
-    *   **Customer:** Shopping, ordering, payments, reviews.
-*   **Secure Authentication:** JWT (JSON Web Token) based stateless authentication.
-
-### 🛒 Customer Features
-*   **Shopping Cart:** Add, update, and remove items with real-time total calculation.
-*   **Coupons:** Apply discount codes to carts.
-*   **Order Management:** Place orders, view order history, and track status.
-*   **Payments:** Integrated payment processing flow (Simulation).
-*   **Reviews & Ratings:** Leave feedback for purchased products.
-
-### 🏪 Vendor Features
-*   **Onboarding:** Self-registration with Admin approval workflow.
-*   **Product Management:** Full CRUD capabilities for managing inventory.
-*   **Order Fulfillment:** View assigned orders, mark as Shipped or Delivered.
-*   **Wallet:** Track earnings from sales.
-*   **Profile Management:** Update store details.
-
-### 🛡️ Admin Features
-*   **Vendor Governance:** Review and approve/reject new vendor registrations.
-*   **Platform Orders:** View and manage all orders across the platform; ability to cancel orders.
-*   **Coupon Management:** Create and manage promotional codes.
-
-## 🔄 Application Workflows
-
-### 1. Vendor Onboarding Flow
-
-#### Step 1: Registration
-*   **Action**: User signs up as a Vendor.
-*   **API**: `POST /register` (with role `VENDOR`)
-*   **Backend Logic**:
-    *   Creates a `User` record with role `VENDOR`.
-    *   Creates a `Vendor` profile linked to the user.
-    *   Sets Vendor Status to `PENDING`.
-*   **Outcome**: User can login but cannot manage products yet.
-
-#### Step 2: Admin Approval
-*   **Action**: Admin reviews pending vendor applications.
-*   **API**: `PUT /admin/vendors/{id}/approve`
-*   **Pre-conditions**: Authenticated as `ADMIN`.
-*   **Backend Logic**:
-    *   Updates Vendor Status to `APPROVED`.
-    *   Enables the user account if it was locked.
-*   **Outcome**: Vendor gains access to product management dashboards.
-
-#### Step 3: Product Listing
-*   **Action**: Vendor adds products to the marketplace.
-*   **API**: `POST /vendor/products`
-*   **Pre-conditions**: Vendor Status must be `APPROVED`.
-*   **Backend Logic**:
-    *   Validates product details (price, stock).
-    *   Links product to the specific Vendor.
-*   **Outcome**: Product becomes visible in the marketplace.
-
-### 2. Order Fulfillment Lifecycle
-
-#### Step 1: Shopping & Checkout
-*   **Action**: Customer adds items to cart and places order.
-*   **API**: `POST /customer/order/create`
-*   **Backend Logic**:
-    *   Validates stock availability in **Redis**.
-    *   **Locking**: Acquires a lock on product/stock to prevent race conditions.
-    *   **Reservation**: Decrements stock in Redis and DB.
-    *   Creates `Order` with status `CREATED`.
-    *   Clears the user's Cart.
-*   **Outcome**: Order created, stock reserved.
-
-#### Step 2: Payment (See Detailed Payment Workflow below)
-*   **Action**: Customer pays for the order.
-*   **Outcome**: Order Status becomes `PAID`.
-
-#### Step 3: Shipping
-*   **Action**: Vendor views new paid orders and ships them.
-*   **API**: `PUT /vendor/orders/{id}/ship`
-*   **Pre-conditions**:
-    *   Order Status must be `PAID`.
-    *   Vendor must own the products in the order.
-*   **Backend Logic**:
-    *   Updates Order Status to `SHIPPED`.
-    *   (Optional) Triggers email notification to Customer.
-
-#### Step 4: Delivery
-*   **Action**: Vendor or Logistics Partner marks order as delivered.
-*   **API**: `PUT /vendor/orders/{id}/deliver`
-*   **Backend Logic**:
-    *   Updates Order Status to `DELIVERED`.
-    *   **Wallet Update**: Credits the Vendor's wallet with the sale amount (platform fees logic can be added here).
-*   **Outcome**: Transaction complete. User can now leave a review.
-
-### 3. Payment Workflow (Stripe Integration)
-The system uses **Stripe PaymentIntents** and **Webhooks** for secure payment processing.
-
-#### Step 1: User Initiates Payment
-*   **Action**: Customer clicks "Pay Now" for an Order.
-*   **API**: `POST /customer/payment/{orderId}`
-*   **Pre-conditions**:
-    *   User must be authenticated (`CUSTOMER` role).
-    *   Order must exist and belong to the user.
-    *   Order Status must be `CREATED` or `PAYMENT_PENDING`.
-*   **Backend Logic**:
-    1.  Calculates total order amount.
-    2.  Creates a **Stripe PaymentIntent** via API.
-    3.  Attaches **Metadata**:
-        *   `order_id`: To link the payment to the order.
-        *   `app_name`: To identify the application (for multi-project support).
-    4.  Creates a local `Payment` record with status `PENDING`.
-    5.  Updates Order Status to `PAYMENT_PENDING`.
-*   **Response**: Returns `clientSecret` and `paymentIntentId`.
-
-#### Step 2: Frontend Processing
-*   **Action**: Frontend uses the `clientSecret` with **Stripe.js**.
-*   **Logic**: Calls `stripe.confirmCardPayment(clientSecret)` to securely handle card details.
-*   **Outcome**: Stripe processes the payment.
-
-#### Step 3: Webhook Verification
-*   **Event**: Stripe sends a webhook event to the backend.
-*   **API**: `POST /stripe/webhook` (Public Endpoint)
-*   **Security**:
-    1.  **Signature Verification**: Backend verifies `Stripe-Signature` header using the configured `stripe.webhook.secret`.
-    2.  **App Verification**: Backend checks `app.name` metadata. If it doesn't match the configured `app.name`, the event is ignored (allowing multiple apps to use the same Stripe account).
-
-#### Step 4: Completion & Status Updates
-*   **Scenario A: Payment Succeeded (`payment_intent.succeeded`)**
-    *   Finds `Payment` record by `paymentIntentId`.
-    *   **Check**: If payment is already `SUCCESS`, logs and skips (idempotency).
-    *   Updates `Payment` Status to `SUCCESS`.
-    *   Updates `Order` Status to **`PAID`**.
-    *   Logs success.
-*   **Scenario B: Payment Failed (`payment_intent.payment_failed`)**
-    *   Updates `Payment` Status to `FAILED`.
-    *   Order Status remains `PAYMENT_PENDING` (user can retry with a different card).
-    *   Logs failure.
-
-
-
-
-## 🏗️ Engineering Highlights
-
-This project demonstrates **System Design** principles and **Clean Architecture**:
-
-### 🛡️ Reliability & Concurrency
-
-*   **Distributed Locking (Database-Based)**:
-    *   The system implements distinct **Distributed Locking** mechanisms to ensure data integrity across multiple application instances.
-    *   **Implementation**: Leverages **Pessimistic Locking** (`PESSIMISTIC_WRITE`) on the database row for each product during checkout.
-    *   **Why it works**: Since the database acts as the single source of truth, this lock prevents race conditions (e.g., overselling stock) even when multiple backend instances are running in parallel. It is a robust alternative to Redis-based locking (Redlock) for strict consistency requirements.
-
-*   **Reservation Timeout (Auto-Expiry)**:
-    *   To prevent "stock hoarding" (users adding items to cart/order but never searching), the system implements an automatic **Reservation Timeout**.
-    *   **Mechanism**:
-        1.  When an Order is created, stock is reserved, and a `reservedUntil` timestamp is set (default: 15 minutes).
-        2.  A mostly-active **Scheduled Task** (`@Scheduled`) runs every 60 seconds to scan for orders that are still in `CREATED` or `PAYMENT_PENDING` state but have passed their reservation time.
-        3.  Expired orders are automatically **Cancelled**, and their stock is released back to the exact relevant Product and Redis cache immediately.
-
-*   **Dual-Layer Stock Management**:
-    *   **Layer 1 (Performance)**: Uses **Redis** for effectively instantaneous stock checks and tentative deductions.
-    *   **Layer 2 (Consistency)**: Uses **Database Transactions** (`@Transactional`) for the final, authoritative stock update, ensuring that money is never taken for out-of-stock items.
-*   **Security Enforcement**:
-    *   **RBAC**: Fine-grained `hasRole()` and `hasAuthority()` checks at the controller level.
-    *   **Stateful to Stateless**: Migrated from session-based to **JWT** (JSON Web Token) authentication for scalability.
-*   **Clean Architecture**:
-    *   **Separation of Concerns**: Controller -> Service -> Repository layers.
-    *   **DTO Pattern**: Exposes strictly typed `DTOs` via APIs, hiding internal JPA `Entities` to prevent over-fetching and accidental exposure of sensitive data.
-*   **Performance Optimization**:
-    *   **Database Indexing**: Strategic indexes on frequent lookup columns (e.g., `vendor_id`, `status`).
-    *   **Efficient Querying**: Uses JPQL and optimized repository methods to fetch only necessary data.
+  <p>
+    <img src="https://img.shields.io/badge/Spring_Boot-3.1.x-6DB33F?style=for-the-badge&logo=spring-boot&logoColor=white" alt="Spring Boot" />
+    <img src="https://img.shields.io/badge/Java_17-%23ED8B00.svg?style=for-the-badge&logo=openjdk&logoColor=white" alt="Java" />
+    <img src="https://img.shields.io/badge/PostgreSQL-316192?style=for-the-badge&logo=postgresql&logoColor=white" alt="PostgreSQL" />
+    <img src="https://img.shields.io/badge/Redis-%23DD0031.svg?style=for-the-badge&logo=redis&logoColor=white" alt="Redis" />
+    <img src="https://img.shields.io/badge/Stripe-626CD9?style=for-the-badge&logo=Stripe&logoColor=white" alt="Stripe" />
+    <img src="https://img.shields.io/badge/JWT-black?style=for-the-badge&logo=JSON%20web%20tokens" alt="JWT" />
+    <img src="https://img.shields.io/badge/Swagger-85EA2D?style=for-the-badge&logo=Swagger&logoColor=black" alt="Swagger" />
+  </p>
+</div>
 
 ---
 
-## 🛠️ Tech Stack
+## 📖 Project Overview
 
-*   **Backend Framework:** Spring Boot (Web, Data JPA, Security, Validation)
-*   **Language:** Java 17
-*   **Database:** PostgreSQL
-*   **Authentication:** Spring Security with JWT (jjwt 0.12.6)
-*   **Caching:** Redis & Spring Cache
-*   **Build Tool:** Maven
+This repository contains the backend core for an enterprise-level, high-concurrency Multi-Vendor E-Commerce platform built with **Spring Boot 3.1.x** and **Java 17**. 
 
+Unlike standard monolithic single-retailer setups, this platform is specifically designed to tackle the unique operational and engineering challenges of high-volume, multi-vendor marketplaces. Key highlights include **thread-safe stock pre-allocation caches**, **strict database-level pessimistic serialization locks**, **automated asynchronous order status managers**, and a **cryptographically secure payment-ledger system** integrated with Stripe.
+
+### 🌟 Business Logic Capabilities
+*   **Multi-Vendor Separation:** Orders containing items from multiple distinct vendors are dynamically partitioned, allowing vendors to only view, process, and ship items belonging to their inventory.
+*   **Dual-Tier Inventory Protection:** Prevents overselling during high-concurrency traffic bursts (such as flash sales) via a combined Redis allocation lock and a database pessimistic update lock.
+*   **Platform Commissions:** Automatic, real-time commission split (10% platform, 90% vendor) credited into virtual wallets with dynamic transaction ledgers on confirmed checkout.
+*   **Secure Payment Ingress:** Stripe checkout session creation with asymmetric webhook validation to eliminate client-side state manipulation vulnerability.
 
 ---
 
-## 📦 Setup & Installation
+## 🏗️ System Architecture & Engineering Highlights
 
-### Prerequisites
-*   Java 17 Development Kit (JDK)
-*   Maven 3.8+
-*   PostgreSQL Database
-*   **Stripe Account** (Secret Key & Webhook Secret)
-
-### Steps
-
-1.  **Clone the Repository**
-    ```bash
-    git clone https://github.com/your-username/ecommerce-backend.git
-    cd ecommerce-backend
-    ```
-
-2.  **Configure Database**
-    Create a PostgreSQL database named `ecommerce`.
-    Update `src/main/resources/application.properties` with your credentials:
-    ```properties
-    spring.datasource.url=jdbc:postgresql://localhost:5432/ecommerce
-    spring.datasource.username=postgres
-    spring.datasource.password=your_password
+```mermaid
+graph TD
+    Client[Client Browser / Mobile App]
+    LB[Load Balancer / Ingress]
+    API[Spring Boot Gateway & Security Filters]
     
-    # Stripe Configuration
-    stripe.secret.key=sk_test_...
-    stripe.webhook.secret=whsec_...
-    app.name=ecommerce
+    subgraph Core Application Engine [Spring Boot Service Context]
+        JwtF[JwtFilter - OncePerRequestFilter]
+        AuthM[AuthenticationManager & BCrypt]
+        OrderS[OrderService - Concurrency Controller]
+        CartS[CartService - Coupon & Totals Manager]
+        PayS[PaymentService - Stripe SDK Wrapper]
+        CommS[CommissionService - Wallet Splitter]
+        CronS[CRON Engine - Scheduled Expiry Cleanup]
+    end
+
+    subgraph Fast Cache Layer [In-Memory Storage]
+        Redis[(Redis Stock Cache)]
+    end
+
+    subgraph Persistent Storage Layer [Relational RDBMS]
+        Postgres[(PostgreSQL Database)]
+    end
+
+    subgraph External Infrastructure
+        Stripe[Stripe API Gateways]
+    end
+
+    Client -->|API Requests with JWT| LB
+    LB --> API
+    API --> JwtF
+    JwtF --> AuthM
+    OrderS -->|1. Atomic Pre-Allocation DECR| Redis
+    OrderS -->|2. SELECT FOR UPDATE lock| Postgres
+    CartS --> Postgres
+    PayS -->|Create PaymentIntent| Stripe
+    Stripe -->|Asynchronous webhook callbacks| API
+    CronS -->|Scan Expired Reservations| Postgres
+    CommS -->|Distribute Splits| Postgres
+```
+
+---
+
+## 🚀 Deep-Dive: Core Technical Design Patterns
+
+### 1. Dual-Layer Inventory & Concurrency Protection
+To safely manage global stock deductions across highly concurrent checkout processes (e.g., flash sales) without causing race conditions (Overselling / Double-spending), the system implements a **Dual-Layer Locking Mechanism**:
+
+*   **Layer 1: Lock-Free Pre-Allocation (Redis Caching)**
+    Before accessing the SQL database, the checkout request is validated against an atomic pre-allocation counter in Redis. When the application starts up, stock amounts are synced from the PostgreSQL rows into Redis using `@PostConstruct`.
+    ```java
+    public boolean reserveStock(Long productId, int quantity) {
+        String key = "product:stock:" + productId;
+        Long remaining = redisTemplate.opsForValue().decrement(key, quantity);
+        if (remaining == null || remaining < 0) {
+            // Revert decrement if stock becomes negative
+            redisTemplate.opsForValue().increment(key, quantity);
+            return false;
+        }
+        return true;
+    }
+    ```
+*   **Layer 2: Strong ACID Database Lock (PostgreSQL Pessimistic Write)**
+    If Redis stock pre-allocation succeeds, the system proceeds to acquire a database row-level lock within a `@Transactional` block. This blocks all concurrent threads from updating the stock of the selected row.
+    ```java
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT p FROM Product p WHERE p.id = :id")
+    Optional<Product> findByIdForUpdate(@Param("id") Long id);
+    ```
+*   **Self-Healing Fallbacks:** If the database updates throw an error or report a mismatch (e.g., product deleted during checkout), the cache counter is immediately incremented back programmatically, ensuring stock-cache synchronization alignment.
+
+---
+
+### 2. State-Machine Driven Order Lifecycle
+Orders travel along a highly secure state transition matrix. Direct jumps (e.g., bypassing payments or shipments) are forbidden and block execution with an `IllegalStateException`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED : User Initiates Checkout (Stock Locked)
+    CREATED --> PAYMENT_PENDING : Stripe Intent Generated
+    CREATED --> CANCELLED : 15-Min Expiry / User Cancellation
+    PAYMENT_PENDING --> PAID : Stripe Webhook Success Callback
+    PAYMENT_PENDING --> CANCELLED : 15-Min Expiry / Webhook Failure Callback
+    PAID --> SHIPPED : Vendor Processes Logistics
+    SHIPPED --> DELIVERED : Final Transit Complete (Completed)
+    PAID --> CANCELLED : Administrative Refund
+    CANCELLED --> [*] : Stock Released in Cache & DB
+    DELIVERED --> [*] : User Can Review Products
+```
+
+#### Automated CRON Stock & Order Reclamation
+To prevent inventory locks caused by abandoned checkouts, a background thread scans the database every 60 seconds:
+```java
+@Transactional
+@Scheduled(fixedRate = 60000)
+public void cancelExpiredOrders() {
+    List<Order> expiredOrders = orderRepo.findByStatusInAndReservedUntilBefore(
+            List.of(OrderStatus.CREATED, OrderStatus.PAYMENT_PENDING),
+            LocalDateTime.now()
+    );
+    for (Order order : expiredOrders) {
+        updateOrderStatus(order.getId(), OrderStatus.CANCELLED);
+    }
+}
+```
+When an order transitions to `CANCELLED`, the system automatically increments both the PostgreSQL inventory counts and the corresponding Redis keys.
+
+---
+
+### 3. Secured Asynchronous Webhooks & Idempotent Processing
+Stripe handles payments asynchronously and calls the backend webhook `/stripe/webhook`.
+*   **Cryptographic Webhook Signature:** The backend checks the signature of the incoming webhook using Stripe's dynamic SDK payload validation to prevent IP spoofing or forged requests.
+*   **Application Boundary Protection:** We inject unique metadata (`app_name`) inside the Stripe billing intent to ignore webhooks received from neighboring test configurations.
+*   **Idempotency Protection:** To prevent duplicate events (at-least-once Stripe delivery guarantees) from double-allocating vendor commissions, we execute payment checks inside a `@Transactional` block. If the local Payment record is already in a `SUCCESS` state, the handler immediately returns early:
+    ```java
+    if (payment.getPaymentStatus() == PaymentStatus.SUCCESS) {
+        log.info("Payment already processed. Skipping.");
+        return;
+    }
     ```
 
-3.  **Build the Application**
-    ```bash
-    ./mvnw clean install
-    ```
+---
 
-4.  **Run the Application**
-    ```bash
-    ./mvnw spring-boot:run
-    ```
-    The application will start on `http://localhost:8080`.
+### 4. Multi-Vendor Payout Splitting & Ledgers
+Unlike standard e-commerce stores, checkout transactions are split dynamically among multiple vendors based on item ownership. Upon Stripe payment confirmation, the `CommissionService` performs the following mathematical balance splits:
+$$\text{Platform Commission (10\%)} = \text{Total Item Price} \times 0.10$$
+$$\text{Vendor Net Credit (90\%)} = \text{Total Item Price} - \text{Platform Commission}$$
 
-5.  **Default Data (Data Seeder)**
-    The application automatically seeds the database with sample users and products on startup if they don't exist.
-
-    **Default Credentials:**
-    *   **Admin:** `admin@example.com` / `admin123`
-    *   **Vendor:** `vendor@example.com` / `vendor123`
-    *   **Customer:** `customer@example.com` / `customer123`
+The vendor's net credit is added to their virtual `VendorWallet` balance, and an immutable audit row is written to `VendorTransaction` recording the gross amount, commission, and net payout for accounting auditing.
 
 ---
 
-## 📡 API Documentation
+## 💾 Database Schema Design
 
-**Interactive API Docs (Swagger UI):** `http://localhost:8080/swagger-ui/index.html`
+The application operates on a highly normalized relational schema structured to guarantee transactional safety:
 
-### 🔓 Public / Authentication
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/register` | Register a new user (Customer) or Vendor (via specific DTO) |
-| `POST` | `/login` | Authenticate and obtain JWT token |
+```
+                  +------------------+
+                  |      USERS       |
+                  +------------------+
+                            | 1
+                            |
+                            | 1:1
+                  +------------------+
+                  |     VENDORS      |
+                  +------------------+
+                   / 1              \ 1
+                  /                  \
+                 / Many:1             \ 1:1
+      +------------------+     +------------------+
+      |     PRODUCTS     |     |  VENDOR_WALLETS  |
+      +------------------+     +------------------+
+               | 1                      | 1
+               |                        |
+               | 1:Many                 | 1:Many
+      +------------------+     +------------------+
+      |   ORDER_ITEMS    |     | VENDOR_TRANS_LGR |
+      +------------------+     +------------------+
+               | Many:1                 |
+               |                        | Many:1
+      +------------------+              |
+      |      ORDERS      |<-------------+
+      +------------------+
+               | 1
+               |
+               | 1:1
+      +------------------+
+      |     PAYMENTS     |
+      +------------------+
+```
 
-### 👤 Customer Endpoints
-_Requires `Bearer Token` with `CUSTOMER` role_
-
-**Cart & Ordering**
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/customer/cart` | View current cart |
-| `POST` | `/customer/cart/add` | Add item into cart |
-| `PUT` | `/customer/cart/update` | Update item quantity |
-| `DELETE` | `/customer/cart/remove/{productId}` | Remove item from cart |
-| `POST` | `/customer/cart/apply-coupon` | Apply a coupon code (`?code=...`) |
-| `POST` | `/customer/order/create` | Place an order from current cart |
-| `GET` | `/customer/orders` | View order history |
-| `GET` | `/customer/order/{id}` | Get specific order details |
-| `POST` | `/customer/payment/{orderId}` | Process payment for an order |
-
-**Other**
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/customer/review` | Submit a product review |
-
-### 🏪 Vendor Endpoints
-_Requires `Bearer Token` with `VENDOR` role_
-
-**Account & Products**
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `POST` | `/vendor/register` | Register as a new Vendor |
-| `GET` | `/vendor/profile` | Get vendor profile details |
-| `PUT` | `/vendor/update` | Update vendor profile |
-| `GET` | `/vendor/wallet` | View earnings/wallet balance |
-| `GET` | `/vendor/my-products` | List all owned products |
-| `POST` | `/vendor/products` | Add a new product |
-| `PUT` | `/vendor/products/{id}` | Update an existing product |
-| `DELETE` | `/vendor/products/{id}` | Delete a product |
-
-**Order Fulfillment**
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/vendor/orders` | View orders containing your products |
-| `PUT` | `/vendor/orders/{id}/ship` | Mark order as Shipped |
-| `PUT` | `/vendor/orders/{id}/deliver` | Mark order as Delivered |
-
-### 🛡️ Admin Endpoints
-_Requires `Bearer Token` with `ADMIN` role_
-
-**Management**
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/admin/orders` | View all platform orders |
-| `PUT` | `/admin/orders/{id}/cancel` | Cancel an order |
-| `POST` | `/admin/coupons` | Create a new coupon |
-| `GET` | `/admin/coupons` | List all coupons |
-| `DELETE` | `/admin/coupons/{id}` | Delete a coupon |
-
-**Vendor Approvals**
-| Method | Endpoint | Description |
-| :--- | :--- | :--- |
-| `GET` | `/admin/vendors/pending` | List vendors awaiting approval |
-| `PUT` | `/admin/vendors/{id}/approve` | Approve a vendor account |
-| `PUT` | `/admin/vendors/{id}/reject` | Reject a vendor account |
+### Table Definitions & Audit Safeguards:
+*   `users`: Authentication details, roles (`ADMIN`, `VENDOR`, `CUSTOMER`), and base registration profiles.
+*   `vendors`: Profile details, validation states, and reference pointer map.
+*   `vendor_wallets`: Relational financial records tracking available vendor balances.
+*   `products`: Stores quantity, description, prices, and relational vendor mapping. Has pessimistic lock points.
+*   `carts` & `cart_items`: Relational user items and volatile browsing states.
+*   `orders` & `order_items`: Permanent financial logs. **Crucial Safeguard:** `order_items` stores a duplicate, immutable snapshot column `priceAtPurchase` to protect against historical order auditing corruption when a vendor changes active product prices in the future.
+*   `vendor_transactions`: Audit log containing commission splits, gross earnings, net amounts, and order references.
 
 ---
 
-## 💾 Database Schema
+## 🛠️ Technology Stack & Requirements
 
-The application uses JPA entities to map to the following tables (auto-generated):
-- `users`: Stores user credentials and roles.
-- `products`: Product details linked to Vendors.
-- `carts` / `cart_items`: Temporary storage for customer items.
-- `orders` / `order_items`: Finalized transactions.
-- `coupons`: Discount codes.
-- `reviews`: Product feedback.
-- `wallets`: Vendor earnings.
-
----
-
-## 🤝 Contributing
-
-1.  Fork the repository.
-2.  Create your feature branch (`git checkout -b feature/AmazingFeature`).
-3.  Commit your changes (`git commit -m 'Add some AmazingFeature'`).
-4.  Push to the branch (`git push origin feature/AmazingFeature`).
-5.  Open a Pull Request.
+*   **Runtime Engine:** Java OpenJDK 17
+*   **Primary Framework:** Spring Boot 3.1.x
+*   **Database (RDBMS):** PostgreSQL (Standard relational backend)
+*   **Caching & Pre-allocation Layer:** Redis (Distributed lock & stock management)
+*   **Payment Provider:** Stripe Java SDK 31.3.0
+*   **API Documentation:** Springdoc OpenAPI / Swagger UI
+*   **Dependency Automation:** Maven 3.8+
+*   **Utilities:** Project Lombok (Clean POJOs)
 
 ---
 
-## 📄 License
+## ⚙️ Quickstart & Installation Tutorial
 
-Distributed under the MIT License. See `LICENSE` for more information.
+### 1. Prerequisites
+Ensure you have the following running in your local workspace:
+*   **PostgreSQL** (`localhost:5432` with a database named `ecommerce`)
+*   **Redis Server** (`localhost:6379`)
+*   **JDK 17** installed and configured in your shell path.
+
+### 2. Properties Configuration
+Update your configuration inside `src/main/resources/application.properties` (or inject via environment variables):
+
+```properties
+# App Boundary Setup
+app.name=ECommerceMultiVendor
+
+# PostgreSQL Connection Properties
+spring.datasource.url=jdbc:postgresql://localhost:5432/ecommerce
+spring.datasource.username=postgres
+spring.datasource.password=root
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+# Redis Connection Properties
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
+spring.data.redis.username=default
+spring.data.redis.password=your_redis_password
+
+# Stripe API Config (Test Keys)
+stripe.secret.key=sk_test_51...
+stripe.webhook.secret=whsec_...
+```
+
+### 3. Build & Bootstrap The Application
+Use the Maven wrapper to build and boot the application:
+```bash
+# Clean project context and build target packages
+./mvnw clean install -DskipTests
+
+# Run the Spring Boot Application
+./mvnw spring-boot:run
+```
+
+Once successfully booted, the server will start serving endpoints at: `http://localhost:8080`
+
+---
+
+## 🧪 Seeding & Test Data Profiles
+
+The system comes pre-configured with a database seeder (`DataSeeder.java`). On startup, if no records are found, the database is auto-populated with testing accounts:
+
+| Role | Username | Password | Operational Metadata |
+| :--- | :--- | :--- | :--- |
+| **Platform Admin** | `admin@example.com` | `admin123` | Master control privileges, vendor approvals. |
+| **Vendor** | `vendor@example.com` | `vendor123` | Approved as *"Tech Gadgets Inc."* (has 3 sample products). |
+| **Customer** | `customer@example.com` | `customer123` | Base client profile with an empty shopping cart. |
+
+---
+
+## 📡 Interactive API Testing (Swagger)
+
+The platform publishes complete REST schemas natively via Swagger UI.
+
+*   **Documentation URL:** `http://localhost:8080/swagger-ui/index.html`
+*   **API Specification:** `http://localhost:8080/v3/api-docs`
+
+```
+                                +-----------------------------------+
+                                |     Swagger UI Auth Workflow      |
+                                +-----------------------------------+
+                                                  |
+                                                  v
+                                     [POST] /auth/login (Auth)
+                                 (Submit Customer/Vendor JSON)
+                                                  |
+                                                  v
+                                     Extract Returned JWT String
+                                                  |
+                                                  v
+                                       Click "Authorize" Button
+                                       (Paste token into popup)
+                                                  |
+                                                  v
+                                    Unlocked Secured REST Routes!
+```
+
+### Secured Endpoint Segments:
+*   `/public/**` & `/auth/**`: Public routing (user registrations, product searches, login actions).
+*   `/customer/**`: Cart updates, order initializations, Stripe intent creations, product reviews.
+*   `/vendor/**`: Product catalogs editing, stock increases, shipping status processing.
+*   `/admin/**`: Platform monitoring, pending vendor reviews, emergency order operations.
+*   `/stripe/webhook`: Stripe API webhook receiver path.
